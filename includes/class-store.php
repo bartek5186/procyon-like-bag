@@ -123,6 +123,10 @@ class Store {
 
     public static function resolve_actor(\WP_REST_Request $req, bool $create_guest_token = false): array {
         $user_id = (int) get_current_user_id();
+        if ($user_id <= 0) {
+            $user_id = self::resolve_user_id_from_auth_cookie($req);
+        }
+
         $guest_token = self::extract_token($req);
 
         if ($user_id > 0) {
@@ -142,6 +146,51 @@ class Store {
             'user_id' => 0,
             'guest_token' => $guest_token,
         ];
+    }
+
+    private static function resolve_user_id_from_auth_cookie(\WP_REST_Request $req): int {
+        if (!defined('LOGGED_IN_COOKIE')) return 0;
+        if (empty($_COOKIE[LOGGED_IN_COOKIE])) return 0;
+        if (!self::is_same_origin_request($req)) return 0;
+
+        $user_id = (int) wp_validate_auth_cookie('', 'logged_in');
+        if ($user_id <= 0) return 0;
+
+        wp_set_current_user($user_id);
+        return $user_id;
+    }
+
+    private static function is_same_origin_request(\WP_REST_Request $req): bool {
+        $allowed_hosts = array_values(array_unique(array_filter(array_map(
+            function ($v): string {
+                return strtolower(trim((string) $v));
+            },
+            [
+                wp_parse_url(home_url('/'), PHP_URL_HOST),
+                wp_parse_url(site_url('/'), PHP_URL_HOST),
+                $_SERVER['HTTP_HOST'] ?? '',
+            ]
+        ))));
+        if (!$allowed_hosts) return false;
+
+        $origin = trim((string) $req->get_header('origin'));
+        if ($origin !== '') {
+            $origin_host = strtolower((string) wp_parse_url($origin, PHP_URL_HOST));
+            if ($origin_host === '' || !in_array($origin_host, $allowed_hosts, true)) return false;
+
+            return true;
+        }
+
+        $referer = trim((string) $req->get_header('referer'));
+        if ($referer !== '') {
+            $referer_host = strtolower((string) wp_parse_url($referer, PHP_URL_HOST));
+            if ($referer_host === '' || !in_array($referer_host, $allowed_hosts, true)) return false;
+
+            return true;
+        }
+
+        $method = strtoupper((string) $req->get_method());
+        return in_array($method, ['GET', 'HEAD', 'OPTIONS'], true);
     }
 
     public static function extract_token(\WP_REST_Request $req): string {

@@ -66,6 +66,12 @@ Gdy token gościa istnieje, odpowiedź API zawiera:
 - pole JSON: `token`
 - header odpowiedzi: `X-Procyon-Like-Bag-Token`
 
+## Uwagi dla trybu zalogowanego
+
+- Aby mieć stabilne ulubione per konto, requesty muszą nieść kontekst autoryzacji WordPress.
+- Rekomendacja dla frontendu: wysyłaj `credentials` oraz `X-WP-Nonce`.
+- Plugin obsługuje też fallback dla same-origin na podstawie cookie zalogowanego użytkownika.
+
 ## Licencja
 
 Ten projekt jest open-source i jest licencjonowany na zasadach **GNU GPL v2 lub nowsza** (`GPL-2.0-or-later`).

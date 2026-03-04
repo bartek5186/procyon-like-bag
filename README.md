@@ -66,6 +66,12 @@ When a guest token exists, API response includes:
 - JSON field: `token`
 - response header: `X-Procyon-Like-Bag-Token`
 
+## Logged-in mode notes
+
+- For stable account-based favorites, requests must carry WordPress auth context.
+- Recommended for frontend requests: send credentials and `X-WP-Nonce`.
+- The plugin also supports same-origin logged-in cookie fallback for REST requests.
+
 ## License
 
 This project is open source and licensed under **GNU GPL v2 or later** (`GPL-2.0-or-later`).
