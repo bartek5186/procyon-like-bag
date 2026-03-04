@@ -20,6 +20,11 @@ require_once PROCYON_LIKE_BAG_PATH . 'includes/class-rest.php';
 
 register_activation_hook(__FILE__, function () {
     \Procyon\LikeBag\Store::install_table();
+    \Procyon\LikeBag\Store::ensure_cleanup_schedule();
+});
+
+register_deactivation_hook(__FILE__, function () {
+    \Procyon\LikeBag\Store::clear_cleanup_schedule();
 });
 
 add_action('plugins_loaded', function () {

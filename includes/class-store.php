@@ -5,9 +5,17 @@ if (!defined('ABSPATH')) exit;
 
 class Store {
     public const COOKIE_NAME = 'procyon_like_bag_token';
+    public const CRON_CLEANUP_HOOK = 'procyon_like_bag_cleanup_guests';
+    private const DEFAULT_GUEST_RETENTION_DAYS = 180;
 
     public static function init_hooks(): void {
         add_action('wp_login', [__CLASS__, 'handle_wp_login'], 10, 2);
+        add_action('before_delete_post', [__CLASS__, 'on_post_delete'], 10, 1);
+        add_action('trashed_post', [__CLASS__, 'on_post_delete'], 10, 1);
+        add_action('transition_post_status', [__CLASS__, 'on_post_status_transition'], 10, 3);
+        add_action(self::CRON_CLEANUP_HOOK, [__CLASS__, 'cleanup_old_guest_rows']);
+
+        self::ensure_cleanup_schedule();
     }
 
     public static function table(): string {
@@ -46,8 +54,71 @@ class Store {
         $token = self::read_cookie_token();
         if ($token === '') return;
 
-        self::merge_guest_into_user($token, (int) $user->ID);
-        self::forget_guest_cookie();
+        $merge = self::merge_guest_into_user($token, (int) $user->ID);
+        if (!is_wp_error($merge)) {
+            self::forget_guest_cookie();
+        }
+    }
+
+    public static function on_post_delete(int $post_id): void {
+        $post = get_post($post_id);
+        if (!$post instanceof \WP_Post) return;
+        if (!in_array($post->post_type, ['product', 'product_variation'], true)) return;
+
+        self::delete_product_from_all_bags((int) $post_id);
+    }
+
+    public static function on_post_status_transition(string $new_status, string $old_status, \WP_Post $post): void {
+        if (!in_array($post->post_type, ['product', 'product_variation'], true)) return;
+        if ($old_status === $new_status) return;
+
+        // Keep only published products in favorites to avoid stale/private items.
+        if ($old_status === 'publish' && $new_status !== 'publish') {
+            self::delete_product_from_all_bags((int) $post->ID);
+        }
+    }
+
+    public static function ensure_cleanup_schedule(): void {
+        if (wp_next_scheduled(self::CRON_CLEANUP_HOOK)) return;
+        wp_schedule_event(time() + HOUR_IN_SECONDS, 'daily', self::CRON_CLEANUP_HOOK);
+    }
+
+    public static function clear_cleanup_schedule(): void {
+        $ts = wp_next_scheduled(self::CRON_CLEANUP_HOOK);
+        while ($ts) {
+            wp_unschedule_event($ts, self::CRON_CLEANUP_HOOK);
+            $ts = wp_next_scheduled(self::CRON_CLEANUP_HOOK);
+        }
+    }
+
+    public static function cleanup_old_guest_rows(): int {
+        global $wpdb;
+
+        $days = (int) apply_filters('procyon_like_bag_guest_retention_days', self::DEFAULT_GUEST_RETENTION_DAYS);
+        $days = min(max(7, $days), 3650);
+
+        $cutoff = gmdate('Y-m-d H:i:s', time() - ($days * DAY_IN_SECONDS));
+        $table = self::table();
+
+        $deleted = $wpdb->query(
+            $wpdb->prepare(
+                "DELETE FROM {$table} WHERE user_id = 0 AND updated_at < %s",
+                $cutoff
+            )
+        );
+
+        if ($deleted === false) return 0;
+        return (int) $deleted;
+    }
+
+    public static function delete_product_from_all_bags(int $product_id): int {
+        global $wpdb;
+
+        if ($product_id <= 0) return 0;
+
+        $deleted = $wpdb->delete(self::table(), ['product_id' => $product_id], ['%d']);
+        if ($deleted === false) return 0;
+        return (int) $deleted;
     }
 
     public static function resolve_actor(\WP_REST_Request $req, bool $create_guest_token = false): array {
@@ -278,18 +349,22 @@ class Store {
         if ($identity === null) return 0;
 
         $table = self::table();
-        if ($identity['user_id'] > 0) {
-            $sql = $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$table} WHERE user_id = %d AND guest_token = ''",
-                $identity['user_id']
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT COUNT(*) FROM {$table} WHERE user_id = 0 AND guest_token = %s",
-                $identity['guest_token']
-            );
-        }
+        $posts = $wpdb->posts;
+        [$actor_where, $actor_params] = self::build_actor_where_sql($identity, 'lb');
 
+        $sql = $wpdb->prepare(
+            "SELECT COUNT(*)
+             FROM {$table} lb
+             INNER JOIN {$posts} p ON p.ID = lb.product_id
+             LEFT JOIN {$posts} parent ON p.post_type = 'product_variation' AND parent.ID = p.post_parent
+             WHERE {$actor_where}
+               AND p.post_status = 'publish'
+               AND (
+                    p.post_type = 'product'
+                    OR (p.post_type = 'product_variation' AND parent.post_type = 'product' AND parent.post_status = 'publish')
+               )",
+            ...$actor_params
+        );
         return (int) $wpdb->get_var($sql);
     }
 
@@ -300,17 +375,22 @@ class Store {
         if ($identity === null) return [];
 
         $table = self::table();
-        if ($identity['user_id'] > 0) {
-            $sql = $wpdb->prepare(
-                "SELECT product_id FROM {$table} WHERE user_id = %d AND guest_token = '' ORDER BY updated_at DESC",
-                $identity['user_id']
-            );
-        } else {
-            $sql = $wpdb->prepare(
-                "SELECT product_id FROM {$table} WHERE user_id = 0 AND guest_token = %s ORDER BY updated_at DESC",
-                $identity['guest_token']
-            );
-        }
+        $posts = $wpdb->posts;
+        [$actor_where, $actor_params] = self::build_actor_where_sql($identity, 'lb');
+        $sql = $wpdb->prepare(
+            "SELECT lb.product_id
+             FROM {$table} lb
+             INNER JOIN {$posts} p ON p.ID = lb.product_id
+             LEFT JOIN {$posts} parent ON p.post_type = 'product_variation' AND parent.ID = p.post_parent
+             WHERE {$actor_where}
+               AND p.post_status = 'publish'
+               AND (
+                    p.post_type = 'product'
+                    OR (p.post_type = 'product_variation' AND parent.post_type = 'product' AND parent.post_status = 'publish')
+               )
+             ORDER BY lb.updated_at DESC",
+            ...$actor_params
+        );
 
         $rows = $wpdb->get_col($sql);
         if (!is_array($rows)) return [];
@@ -318,17 +398,53 @@ class Store {
         return array_map('intval', $rows);
     }
 
-    public static function merge_guest_into_user(string $token, int $user_id): int {
+    public static function merge_guest_into_user(string $token, int $user_id) {
         global $wpdb;
 
         $token = self::sanitize_token($token);
         $user_id = (int) $user_id;
-        if ($token === '' || $user_id <= 0) return 0;
+        if ($token === '' || $user_id <= 0) {
+            return [
+                'guest_rows' => 0,
+                'merged_new' => 0,
+                'deleted_guest_rows' => 0,
+            ];
+        }
 
         $table = self::table();
         $now = current_time('mysql', true);
 
-        $wpdb->query(
+        $guest_rows = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*) FROM {$table} WHERE user_id = 0 AND guest_token = %s",
+                $token
+            )
+        );
+        if ($guest_rows <= 0) {
+            return [
+                'guest_rows' => 0,
+                'merged_new' => 0,
+                'deleted_guest_rows' => 0,
+            ];
+        }
+
+        $mergeable_new = (int) $wpdb->get_var(
+            $wpdb->prepare(
+                "SELECT COUNT(*)
+                 FROM {$table} g
+                 LEFT JOIN {$table} u
+                    ON u.user_id = %d
+                   AND u.guest_token = ''
+                   AND u.product_id = g.product_id
+                 WHERE g.user_id = 0
+                   AND g.guest_token = %s
+                   AND u.id IS NULL",
+                $user_id,
+                $token
+            )
+        );
+
+        $inserted = $wpdb->query(
             $wpdb->prepare(
                 "INSERT INTO {$table} (user_id, guest_token, product_id, created_at, updated_at)
                  SELECT %d AS user_id, '' AS guest_token, src.product_id, %s, %s
@@ -341,6 +457,9 @@ class Store {
                 $token
             )
         );
+        if ($inserted === false) {
+            return new \WP_Error('db_merge_failed', 'Could not merge guest like bag into user account.', ['status' => 500]);
+        }
 
         $deleted = $wpdb->query(
             $wpdb->prepare(
@@ -349,8 +468,15 @@ class Store {
             )
         );
 
-        if ($deleted === false) return 0;
-        return (int) $deleted;
+        if ($deleted === false) {
+            return new \WP_Error('db_merge_cleanup_failed', 'Guest like bag could not be cleaned after merge.', ['status' => 500]);
+        }
+
+        return [
+            'guest_rows' => $guest_rows,
+            'merged_new' => max(0, $mergeable_new),
+            'deleted_guest_rows' => (int) $deleted,
+        ];
     }
 
     public static function is_valid_product(int $product_id): bool {
@@ -358,9 +484,20 @@ class Store {
 
         $post = get_post($product_id);
         if (!$post instanceof \WP_Post) return false;
-        if ($post->post_status === 'trash') return false;
+        if (!in_array($post->post_type, ['product', 'product_variation'], true)) return false;
+        if ($post->post_status !== 'publish') return false;
 
-        return in_array($post->post_type, ['product', 'product_variation'], true);
+        if ($post->post_type === 'product_variation') {
+            $parent_id = (int) $post->post_parent;
+            if ($parent_id <= 0) return false;
+
+            $parent = get_post($parent_id);
+            if (!$parent instanceof \WP_Post) return false;
+            if ($parent->post_type !== 'product') return false;
+            if ($parent->post_status !== 'publish') return false;
+        }
+
+        return true;
     }
 
     private static function normalize_actor_for_write(array $actor) {
@@ -398,6 +535,20 @@ class Store {
         return [
             'user_id' => 0,
             'guest_token' => $guest_token,
+        ];
+    }
+
+    private static function build_actor_where_sql(array $identity, string $alias): array {
+        if ((int) $identity['user_id'] > 0) {
+            return [
+                "{$alias}.user_id = %d AND {$alias}.guest_token = ''",
+                [(int) $identity['user_id']],
+            ];
+        }
+
+        return [
+            "{$alias}.user_id = 0 AND {$alias}.guest_token = %s",
+            [(string) $identity['guest_token']],
         ];
     }
 }

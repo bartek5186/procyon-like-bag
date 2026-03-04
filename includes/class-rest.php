@@ -90,7 +90,10 @@ class Rest {
         $merged = 0;
 
         if ((int) $actor['user_id'] > 0 && $auto_merge && $actor['guest_token'] !== '') {
-            $merged = Store::merge_guest_into_user($actor['guest_token'], (int) $actor['user_id']);
+            $merge = Store::merge_guest_into_user($actor['guest_token'], (int) $actor['user_id']);
+            if (is_wp_error($merge)) return $merge;
+
+            $merged = (int) ($merge['merged_new'] ?? 0);
             Store::forget_guest_cookie();
         }
 
@@ -201,11 +204,14 @@ class Rest {
         }
 
         $merged = Store::merge_guest_into_user($token, $user_id);
+        if (is_wp_error($merged)) return $merged;
         Store::forget_guest_cookie();
 
         $payload = self::build_bag_payload($actor, false);
         $payload['action'] = 'merged';
-        $payload['merged_from_guest'] = $merged;
+        $payload['merged_from_guest'] = (int) ($merged['merged_new'] ?? 0);
+        $payload['merged_guest_rows'] = (int) ($merged['guest_rows'] ?? 0);
+        $payload['deleted_guest_rows'] = (int) ($merged['deleted_guest_rows'] ?? 0);
 
         return self::respond($payload, $actor);
     }
@@ -233,6 +239,7 @@ class Rest {
         foreach ($ids as $id) {
             $id = (int) $id;
             if ($id <= 0) continue;
+            if (!Store::is_valid_product($id)) continue;
 
             if (function_exists('wc_get_product')) {
                 $product = wc_get_product($id);

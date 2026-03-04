@@ -65,3 +65,9 @@ Token gościa można przekazać przez:
 Gdy token gościa istnieje, odpowiedź API zawiera:
 - pole JSON: `token`
 - header odpowiedzi: `X-Procyon-Like-Bag-Token`
+
+## Licencja
+
+Ten projekt jest open-source i jest licencjonowany na zasadach **GNU GPL v2 lub nowsza** (`GPL-2.0-or-later`).
+
+Zobacz [LICENSE](./LICENSE).

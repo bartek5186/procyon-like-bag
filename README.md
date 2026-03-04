@@ -65,3 +65,9 @@ Guest token can be passed in:
 When a guest token exists, API response includes:
 - JSON field: `token`
 - response header: `X-Procyon-Like-Bag-Token`
+
+## License
+
+This project is open source and licensed under **GNU GPL v2 or later** (`GPL-2.0-or-later`).
+
+See [LICENSE](./LICENSE).
